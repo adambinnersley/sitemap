@@ -36,11 +36,15 @@ class Sitemap
      */
     public function __construct($uri = null)
     {
-        $this->guzzle = new Client();
+        $this->guzzle = new Client([
+            'timeout' => 30,
+            'connect_timeout' => 10,
+        ]);
         if ($uri !== null) {
             $this->setDomain($uri);
         }
-        $this->setFilePath($_SERVER['DOCUMENT_ROOT'].'/')
+        $documentRoot = $_SERVER['DOCUMENT_ROOT'] ?? getcwd();
+        $this->setFilePath($documentRoot . '/')
              ->setXMLLayoutPath(realpath(dirname(__FILE__)).'/types/');
     }
     
@@ -110,7 +114,7 @@ class Sitemap
     
     /**
      * Add a string or array of strings to ignore any URL containing the added item(s)
-     * @param straing|array $ignore The item or array of items that you want to ignore any URL containing
+     * @param string|array $ignore The item or array of items that you want to ignore any URL containing
      * @return $this
      */
     public function addURLItemstoIgnore($ignore)
@@ -131,21 +135,19 @@ class Sitemap
     
     /**
      * Parses each page of the website up to the given number of levels
-     * @param int $maxlevels The maximum number of levels from the homepage that should be crawled fro the website
-     * @return array And array is return with all of the site pages and information
+     * @param int $maxlevels The maximum number of levels from the homepage that should be crawled for the website
+     * @return array An array is returned with all of the site pages and information
      */
     protected function parseSite($maxlevels = 5)
     {
         $this->getMarkup($this->getDomain());
         $this->getLinks(1);
-        $level = 2;
         for ($i = 1; $i <= $maxlevels; $i++) {
             foreach ($this->links as $link => $info) {
                 if ($info['visited'] == 0) {
                     $this->getMarkup($link);
                     $this->getLinks(($info['level'] + 1));
                 }
-                $level++;
             }
         }
         return $this->links;
@@ -161,15 +163,15 @@ class Sitemap
         $this->url = $uri;
         $this->host = parse_url($this->url);
         $this->links[$uri]['visited'] = 1;
-        
-        $responce = $this->guzzle->request('GET', $uri, ['http_errors' => false, 'track_redirects' => true]);
-        $this->markup = $responce->getBody();
-        if ($responce->getStatusCode() === 200) {
+
+        $response = $this->guzzle->request('GET', $uri, ['http_errors' => false, 'track_redirects' => true]);
+        $this->markup = $response->getBody();
+        if ($response->getStatusCode() === 200) {
             $this->html = HtmlDomParser::str_get_html($this->markup);
             $this->links[$uri]['markup'] = $this->html;
             $this->links[$uri]['images'] = $this->getImages();
         } else {
-            $this->links[$uri]['error'] = $responce->getStatusCode();
+            $this->links[$uri]['error'] = $response->getStatusCode();
         }
     }
     
@@ -257,24 +259,77 @@ class Sitemap
     }
     
     /**
+     * Check if the URL scheme is valid for crawling (http/https only)
+     * @param array $linkInfo The parsed URL information
+     * @return boolean Returns true if scheme is valid or not set, false for invalid schemes
+     */
+    protected function isValidScheme($linkInfo)
+    {
+        if (!isset($linkInfo['scheme'])) {
+            return true;
+        }
+        $scheme = strtolower($linkInfo['scheme']);
+        return in_array($scheme, ['http', 'https']);
+    }
+
+    /**
      * Adds the link to the attribute array
      * @param array $linkInfo This should be the link information array
      */
     protected function addLinktoArray($linkInfo, $link, $level = 1)
     {
+        if (!$this->isValidScheme($linkInfo)) {
+            return;
+        }
         if ((!isset($linkInfo['host']) || (isset($linkInfo['host']) && isset($this->host['host']) && $this->host['host'] == $linkInfo['host'])) && !isset($linkInfo['username']) && !isset($linkInfo['password']) && isset($linkInfo['path']) && !isset($this->paths[$linkInfo['path']]) && !$this->checkForIgnoredStrings($link)) {
             $this->paths[$linkInfo['path']] = true;
-            $linkExt = (isset($linkInfo['path']) ? explode('.', $linkInfo['path']) : false);
-            $pass = true;
-            if (isset($linkExt[1])) {
-                $pass = (in_array(strtolower($linkExt[1]), ['jpg', 'jpeg', 'gif', 'png']) ? false : true);
-            }
-            if ($pass === true) {
+            $extension = strtolower(pathinfo($linkInfo['path'], PATHINFO_EXTENSION));
+            $excludedExtensions = ['jpg', 'jpeg', 'gif', 'png', 'svg', 'webp', 'bmp', 'ico'];
+            if (!in_array($extension, $excludedExtensions)) {
                 $this->addLink($linkInfo, $link, $level);
             }
         }
     }
     
+    /**
+     * Normalize a URL path by resolving . and .. segments
+     * @param string $path The path to normalize
+     * @return string The normalized path
+     */
+    protected function normalizePath($path)
+    {
+        // Handle empty path
+        if (empty($path)) {
+            return '/';
+        }
+
+        // Split path into segments
+        $segments = explode('/', $path);
+        $normalized = [];
+
+        foreach ($segments as $segment) {
+            if ($segment === '..') {
+                // Go up one directory (remove last segment if possible)
+                if (!empty($normalized) && end($normalized) !== '') {
+                    array_pop($normalized);
+                }
+            } elseif ($segment !== '.' && $segment !== '') {
+                // Add valid segments (skip . and empty segments except for leading /)
+                $normalized[] = $segment;
+            }
+        }
+
+        // Rebuild path
+        $result = '/' . implode('/', $normalized);
+
+        // Preserve trailing slash if original had one
+        if (substr($path, -1) === '/' && substr($result, -1) !== '/') {
+            $result .= '/';
+        }
+
+        return $result;
+    }
+
     /**
      * Returns the full link path
      * @param array $linkInfo This should be all of the link information
@@ -290,13 +345,29 @@ class Sitemap
         if (!isset($linkInfo['host'])) {
             $fullLink .= $this->host['host'];
         }
-        
+
         if (!isset($linkInfo['path']) && isset($linkInfo['query'])) {
-            return $fullLink.$this->host['path'].$path;
+            $finalPath = $fullLink.$this->host['path'].$path;
         } elseif (isset($linkInfo['path'][0]) && $linkInfo['path'][0] != '/' && !isset($linkInfo['query'])) {
-            return $fullLink.'/'.$path;
+            $finalPath = $fullLink.'/'.$path;
+        } else {
+            $finalPath = $fullLink.$path;
         }
-        return $fullLink.$path;
+
+        // Normalize the path portion of the URL to resolve ../ sequences
+        $parsedFinal = parse_url($finalPath);
+        if (isset($parsedFinal['path']) && strpos($parsedFinal['path'], '..') !== false) {
+            $normalizedPath = $this->normalizePath($parsedFinal['path']);
+            $finalPath = $parsedFinal['scheme'] . '://' . $parsedFinal['host'] . $normalizedPath;
+            if (isset($parsedFinal['query'])) {
+                $finalPath .= '?' . $parsedFinal['query'];
+            }
+            if (isset($parsedFinal['fragment'])) {
+                $finalPath .= '#' . $parsedFinal['fragment'];
+            }
+        }
+
+        return $finalPath;
     }
     
     /**
@@ -320,6 +391,16 @@ class Sitemap
     }
 
     /**
+     * Escape a string for safe use in XML
+     * @param string $string The string to escape
+     * @return string The escaped string safe for XML
+     */
+    private function escapeXml($string)
+    {
+        return htmlspecialchars($string, ENT_XML1 | ENT_QUOTES, 'UTF-8');
+    }
+
+    /**
      * Creates the formatted string for the sitemap with the correct information in
      * @param string $url The full URL of the page
      * @param double $priority The priority to give the page on the website
@@ -332,14 +413,22 @@ class Sitemap
     {
         $urlXML = $this->getLayoutFile('urlXML');
         if ($urlXML !== false) {
-            return sprintf($urlXML, $url, ((empty($modified) ? date('c') : $modified)), $freq, $priority, $additional);
+            return sprintf(
+                $urlXML,
+                $this->escapeXml($url),
+                $this->escapeXml(empty($modified) ? date('c') : $modified),
+                $this->escapeXml($freq),
+                $this->escapeXml($priority),
+                $additional
+            );
         }
+        return '';
     }
     
     /**
      * Creates the image XML string information to add to the sitemap for the website
      * @param array|false $images The array of images for the site
-     * @return string Return the formatted string for the image section of the sitemap
+     * @return string|false Return the formatted string for the image section of the sitemap
      */
     private function imageXML($images)
     {
@@ -347,7 +436,11 @@ class Sitemap
         $imageXML = $this->getLayoutFile('imageXML');
         if ($imageXML !== false && is_array($images) && !empty($images)) {
             foreach ($images as $imgInfo) {
-                $imageString.= sprintf($imageXML, $imgInfo['src'], htmlentities($imgInfo['alt']));
+                $imageString .= sprintf(
+                    $imageXML,
+                    $this->escapeXml($imgInfo['src']),
+                    $this->escapeXml($imgInfo['alt'] ?? '')
+                );
             }
         }
         return $imageString;
@@ -356,7 +449,7 @@ class Sitemap
     /**
      * Return the XML sitemap video section formatted string
      * @param array|false $videos The array of videos for the site
-     * @return string Returns the video sitemap formatted string
+     * @return string|false Returns the video sitemap formatted string
      */
     private function videoXML($videos)
     {
@@ -364,12 +457,36 @@ class Sitemap
         $videoXML = $this->getLayoutFile('videoXML');
         if ($videoXML !== false && is_array($videos) && !empty($videos)) {
             foreach ($videos as $vidInfo) {
-                $videoString.= sprintf($videoXML, $vidInfo['thumbnail'], $vidInfo['title'], $vidInfo['description'], $vidInfo['src'], '', 'yes', 'no');
+                $videoString .= sprintf(
+                    $videoXML,
+                    $this->escapeXml($vidInfo['thumbnail'] ?? ''),
+                    $this->escapeXml($vidInfo['title'] ?? ''),
+                    $this->escapeXml($vidInfo['description'] ?? ''),
+                    $this->escapeXml($vidInfo['src'] ?? ''),
+                    '',
+                    'yes',
+                    'no'
+                );
             }
         }
         return $videoString;
     }
     
+    /**
+     * Sanitize a filename to prevent path traversal attacks
+     * @param string $filename The filename to sanitize
+     * @return string The sanitized filename
+     */
+    private function sanitizeFilename($filename)
+    {
+        // Remove any directory components and keep only the base name
+        $filename = basename($filename);
+        // Remove any characters that aren't alphanumeric, dash, or underscore
+        $filename = preg_replace('/[^a-zA-Z0-9_-]/', '', $filename);
+        // Ensure we have a valid filename
+        return !empty($filename) ? $filename : 'sitemap';
+    }
+
     /**
      * Create a XML sitemap using the URL given during construct and crawls the rest of the websites
      * @param boolean $includeStyle If you want the XML Style to also be created set this as true else set as false
@@ -381,7 +498,14 @@ class Sitemap
     {
         $assets = '';
         foreach ($this->parseSite($maxLevels) as $url => $info) {
-            $assets.= $this->urlXML($url, (isset($info['level']) ? $this->priority[$info['level']] : 1), (isset($info['level']) ? $this->frequency[$info['level']] : 'weekly'), date('c'), (isset($info['images']) ? $this->imageXML($info['images']) : false).(isset($info['videos']) ? $this->videoXML($info['videos']) : false));
+            $assets .= $this->urlXML(
+                $url,
+                (isset($info['level']) ? $this->priority[$info['level']] : 1),
+                (isset($info['level']) ? $this->frequency[$info['level']] : 'weekly'),
+                date('c'),
+                (isset($info['images']) ? $this->imageXML($info['images']) : '') .
+                (isset($info['videos']) ? $this->videoXML($info['videos']) : '')
+            );
         }
         $sitemapXML = $this->getLayoutFile('sitemapXML');
         $sitemap = ($sitemapXML !== false ? sprintf($sitemapXML, ($includeStyle === true ? '<?xml-stylesheet type="text/xsl" href="style.xsl"?>' : ''), $assets) : '');
@@ -389,7 +513,8 @@ class Sitemap
             $this->copyXMLStyle();
         }
         if (strlen($sitemap) > 1) {
-            return (file_put_contents($this->getFilePath().strtolower($filename).'.xml', $sitemap) !== false ? true : false);
+            $safeFilename = $this->sanitizeFilename($filename);
+            return file_put_contents($this->getFilePath() . strtolower($safeFilename) . '.xml', $sitemap) !== false;
         }
         return false;
     }
