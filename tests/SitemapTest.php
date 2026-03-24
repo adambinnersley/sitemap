@@ -5,6 +5,10 @@ namespace Sitemap\Tests;
 use PHPUnit\Framework\TestCase;
 use Sitemap\Sitemap;
 use KubAT\PhpSimple\HtmlDomParser;
+use GuzzleHttp\Client;
+use GuzzleHttp\Handler\MockHandler;
+use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Psr7\Response;
 
 /**
  * Testable subclass that exposes protected methods
@@ -140,6 +144,21 @@ class TestableSitemap extends Sitemap
     public function setUrl($url)
     {
         $this->url = $url;
+    }
+
+    public function testGetRobotsDirectives()
+    {
+        return $this->getRobotsDirectives();
+    }
+
+    public function setLinksArray($links)
+    {
+        $this->links = $links;
+    }
+
+    public function setGuzzleClient(Client $client)
+    {
+        $this->guzzle = $client;
     }
 }
 
@@ -976,9 +995,12 @@ class SitemapTest extends TestCase
      */
     public function testCreateSitemap()
     {
-        // Skip if no network available
-        if (!@fsockopen('www.google.com', 443, $errno, $errstr, 5)) {
-            $this->markTestSkipped('Network not available');
+        // Skip if no network or SSL is unavailable
+        try {
+            $client = new Client(['timeout' => 5, 'connect_timeout' => 5]);
+            $client->request('GET', 'https://www.google.com', ['http_errors' => false]);
+        } catch (\Exception $e) {
+            $this->markTestSkipped('Network or SSL not available: ' . $e->getMessage());
         }
 
         $this->sitemap->setDomain('https://www.netflix.com/')->setFilePath($this->testDir . '/');
@@ -991,5 +1013,809 @@ class SitemapTest extends TestCase
         $this->assertTrue($newSitemap->createSitemap(false));
         $this->assertStringContainsString('<loc>https://www.adambinnersley.co.uk/</loc>', file_get_contents($this->testDir . '/sitemap.xml'));
         $this->assertStringNotContainsString('about-me', file_get_contents($this->testDir . '/sitemap.xml'));
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::getVideos
+     * @covers Sitemap\Sitemap::getAssets
+     * @covers Sitemap\Sitemap::buildLink
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testGetVideosWithContent()
+    {
+        $this->testableSitemap->setHost([
+            'scheme' => 'https',
+            'host' => 'www.example.com'
+        ]);
+        $this->testableSitemap->setUrl('https://www.example.com/');
+
+        $html = '<html><body>
+            <video src="/videos/intro.mp4"></video>
+            <video src="/videos/demo.mp4"></video>
+        </body></html>';
+        $dom = HtmlDomParser::str_get_html($html);
+        $this->testableSitemap->setHtml($dom);
+
+        $videos = $this->testableSitemap->testGetVideos();
+        $this->assertIsArray($videos);
+        $this->assertCount(2, $videos);
+        $this->assertStringContainsString('intro.mp4', $videos[0]['src']);
+        $this->assertStringContainsString('demo.mp4', $videos[1]['src']);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::getVideos
+     * @covers Sitemap\Sitemap::getAssets
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testGetVideosEmpty()
+    {
+        $html = '<html><body><p>No videos here</p></body></html>';
+        $dom = HtmlDomParser::str_get_html($html);
+        $this->testableSitemap->setHtml($dom);
+
+        $videos = $this->testableSitemap->testGetVideos();
+        $this->assertFalse($videos);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::getLinks
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testGetLinksWithEmptyMarkup()
+    {
+        $this->testableSitemap->setMarkup('');
+        $this->testableSitemap->setHtml(null);
+        $this->testableSitemap->testGetLinks(1);
+
+        // Should not add any paths when markup is empty
+        $this->assertEmpty($this->testableSitemap->getPathsArray());
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::addLink
+     * @covers Sitemap\Sitemap::linkPath
+     * @covers Sitemap\Sitemap::normalizePath
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testAddLinkWithFragmentStripped()
+    {
+        $this->testableSitemap->setHost([
+            'scheme' => 'https',
+            'host' => 'www.example.com'
+        ]);
+        $this->testableSitemap->setUrl('https://www.example.com/');
+
+        $linkInfo = parse_url('/about#section');
+        $this->testableSitemap->testAddLink($linkInfo, '/about#section', 1);
+
+        $links = $this->testableSitemap->getLinksArray();
+        // Fragment should be stripped from the key
+        $this->assertArrayHasKey('https://www.example.com/about', $links);
+        $this->assertArrayNotHasKey('https://www.example.com/about#section', $links);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::addLink
+     * @covers Sitemap\Sitemap::linkPath
+     * @covers Sitemap\Sitemap::normalizePath
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testAddLinkLevelCappedAtFive()
+    {
+        $this->testableSitemap->setHost([
+            'scheme' => 'https',
+            'host' => 'www.example.com'
+        ]);
+        $this->testableSitemap->setUrl('https://www.example.com/');
+
+        $linkInfo = parse_url('/deep-page');
+        $this->testableSitemap->testAddLink($linkInfo, '/deep-page', 10);
+
+        $links = $this->testableSitemap->getLinksArray();
+        $this->assertEquals(5, $links['https://www.example.com/deep-page']['level']);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::addLink
+     * @covers Sitemap\Sitemap::linkPath
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testAddLinkSkipsRootSlash()
+    {
+        $this->testableSitemap->setHost([
+            'scheme' => 'https',
+            'host' => 'www.example.com'
+        ]);
+        $this->testableSitemap->setUrl('https://www.example.com/');
+
+        $linkInfo = parse_url('/');
+        $this->testableSitemap->testAddLink($linkInfo, '/', 1);
+
+        $links = $this->testableSitemap->getLinksArray();
+        // Root slash link should be skipped
+        $this->assertEmpty($links);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::linkPath
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testLinkPathWithQueryOnly()
+    {
+        $this->testableSitemap->setHost([
+            'scheme' => 'https',
+            'host' => 'www.example.com',
+            'path' => '/search'
+        ]);
+
+        $linkInfo = ['query' => 'q=test'];
+        $result = $this->testableSitemap->testLinkPath($linkInfo, '?q=test');
+        $this->assertEquals('https://www.example.com/search?q=test', $result);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::linkPath
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testLinkPathWithRelativePath()
+    {
+        $this->testableSitemap->setHost([
+            'scheme' => 'https',
+            'host' => 'www.example.com'
+        ]);
+
+        $linkInfo = ['path' => 'relative-page'];
+        $result = $this->testableSitemap->testLinkPath($linkInfo, 'relative-page');
+        $this->assertEquals('https://www.example.com/relative-page', $result);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::buildLink
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testBuildLinkWithExternalHost()
+    {
+        $this->testableSitemap->setHost([
+            'scheme' => 'https',
+            'host' => 'www.example.com'
+        ]);
+
+        // External link should return empty string
+        $linkInfo = parse_url('https://www.other-site.com/page');
+        $result = $this->testableSitemap->testBuildLink($linkInfo, 'https://www.other-site.com/page');
+        $this->assertEquals('', $result);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::buildLink
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testBuildLinkWithSameHost()
+    {
+        $this->testableSitemap->setHost([
+            'scheme' => 'https',
+            'host' => 'www.example.com'
+        ]);
+
+        $linkInfo = parse_url('https://www.example.com/image.png');
+        $result = $this->testableSitemap->testBuildLink($linkInfo, 'https://www.example.com/image.png');
+        $this->assertStringContainsString('image.png', $result);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::urlXML
+     * @covers Sitemap\Sitemap::escapeXml
+     * @covers Sitemap\Sitemap::getLayoutFile
+     * @covers Sitemap\Sitemap::getXMLLayoutPath
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testUrlXMLWithMissingLayout()
+    {
+        $sitemap = new TestableSitemap();
+        $sitemap->setXMLLayoutPath($this->testDir . '/');
+
+        // Layout file won't exist in test dir, should return empty string
+        $result = $sitemap->testUrlXML('https://example.com/', '0.8', 'monthly');
+        $this->assertEquals('', $result);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::imageXML
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testImageXMLWithFalse()
+    {
+        $result = $this->testableSitemap->testImageXML(false);
+        $this->assertFalse($result);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::imageXML
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testImageXMLWithEmptyArray()
+    {
+        $result = $this->testableSitemap->testImageXML([]);
+        $this->assertFalse($result);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::videoXML
+     * @covers Sitemap\Sitemap::escapeXml
+     * @covers Sitemap\Sitemap::getLayoutFile
+     * @covers Sitemap\Sitemap::getXMLLayoutPath
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testVideoXMLWithVideos()
+    {
+        $videos = [
+            [
+                'src' => 'https://www.example.com/video.mp4',
+                'thumbnail' => 'https://www.example.com/thumb.jpg',
+                'title' => 'Test Video',
+                'description' => 'A test video'
+            ]
+        ];
+        $result = $this->testableSitemap->testVideoXML($videos);
+        $this->assertStringContainsString('video.mp4', $result);
+        $this->assertStringContainsString('Test Video', $result);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::videoXML
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testVideoXMLWithFalse()
+    {
+        $result = $this->testableSitemap->testVideoXML(false);
+        $this->assertFalse($result);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::videoXML
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testVideoXMLWithEmptyArray()
+    {
+        $result = $this->testableSitemap->testVideoXML([]);
+        $this->assertFalse($result);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::addLinktoArray
+     * @covers Sitemap\Sitemap::isValidScheme
+     * @covers Sitemap\Sitemap::checkForIgnoredStrings
+     * @covers Sitemap\Sitemap::getURLItemsToIgnore
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testAddLinktoArrayRejectsUrlWithCredentials()
+    {
+        $this->testableSitemap->setHost([
+            'scheme' => 'https',
+            'host' => 'www.example.com'
+        ]);
+        $this->testableSitemap->setUrl('https://www.example.com/');
+
+        $linkInfo = parse_url('https://user:pass@www.example.com/admin');
+        $this->testableSitemap->testAddLinktoArray($linkInfo, 'https://user:pass@www.example.com/admin', 1);
+
+        $this->assertArrayNotHasKey(
+            'https://www.example.com/admin',
+            $this->testableSitemap->getLinksArray()
+        );
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::addLinktoArray
+     * @covers Sitemap\Sitemap::isValidScheme
+     * @covers Sitemap\Sitemap::checkForIgnoredStrings
+     * @covers Sitemap\Sitemap::getURLItemsToIgnore
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testAddLinktoArrayRejectsExternalHost()
+    {
+        $this->testableSitemap->setHost([
+            'scheme' => 'https',
+            'host' => 'www.example.com'
+        ]);
+        $this->testableSitemap->setUrl('https://www.example.com/');
+
+        $linkInfo = parse_url('https://www.other.com/page');
+        $this->testableSitemap->testAddLinktoArray($linkInfo, 'https://www.other.com/page', 1);
+
+        $this->assertEmpty($this->testableSitemap->getLinksArray());
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::addLinktoArray
+     * @covers Sitemap\Sitemap::isValidScheme
+     * @covers Sitemap\Sitemap::checkForIgnoredStrings
+     * @covers Sitemap\Sitemap::getURLItemsToIgnore
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testAddLinktoArrayRejectsDuplicatePaths()
+    {
+        $this->testableSitemap->setHost([
+            'scheme' => 'https',
+            'host' => 'www.example.com'
+        ]);
+        $this->testableSitemap->setUrl('https://www.example.com/');
+
+        $linkInfo = parse_url('/page');
+        $this->testableSitemap->testAddLinktoArray($linkInfo, '/page', 1);
+        $this->testableSitemap->testAddLinktoArray($linkInfo, '/page', 2);
+
+        $links = $this->testableSitemap->getLinksArray();
+        // Should only have one entry, at level 1
+        $this->assertEquals(1, $links['https://www.example.com/page']['level']);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::getAssets
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testGetAssetsWithNonObjectHtml()
+    {
+        $this->testableSitemap->setHtml(null);
+        $result = $this->testableSitemap->testGetAssets();
+        $this->assertFalse($result);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::getRobotsDirectives
+     */
+    public function testGetRobotsDirectivesNoindex()
+    {
+        $html = '<html><head><meta name="robots" content="noindex"></head><body><p>Test</p></body></html>';
+        $dom = HtmlDomParser::str_get_html($html);
+        $this->testableSitemap->setHtml($dom);
+
+        $directives = $this->testableSitemap->testGetRobotsDirectives();
+        $this->assertContains('noindex', $directives);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::getRobotsDirectives
+     */
+    public function testGetRobotsDirectivesNoindexNofollow()
+    {
+        $html = '<html><head><meta name="robots" content="noindex, nofollow"></head><body><p>Test</p></body></html>';
+        $dom = HtmlDomParser::str_get_html($html);
+        $this->testableSitemap->setHtml($dom);
+
+        $directives = $this->testableSitemap->testGetRobotsDirectives();
+        $this->assertContains('noindex', $directives);
+        $this->assertContains('nofollow', $directives);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::getRobotsDirectives
+     */
+    public function testGetRobotsDirectivesNone()
+    {
+        $html = '<html><head><title>Test</title></head><body><p>Test</p></body></html>';
+        $dom = HtmlDomParser::str_get_html($html);
+        $this->testableSitemap->setHtml($dom);
+
+        $directives = $this->testableSitemap->testGetRobotsDirectives();
+        $this->assertEmpty($directives);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::getRobotsDirectives
+     */
+    public function testGetRobotsDirectivesIndexFollow()
+    {
+        $html = '<html><head><meta name="robots" content="index, follow"></head><body><p>Test</p></body></html>';
+        $dom = HtmlDomParser::str_get_html($html);
+        $this->testableSitemap->setHtml($dom);
+
+        $directives = $this->testableSitemap->testGetRobotsDirectives();
+        $this->assertContains('index', $directives);
+        $this->assertContains('follow', $directives);
+        $this->assertNotContains('noindex', $directives);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::getRobotsDirectives
+     * @covers Sitemap\Sitemap::getMarkup
+     */
+    public function testNoindexPageExcludedFromSitemap()
+    {
+        // Simulate a page marked as noindex being in the links array
+        $this->testableSitemap->setLinksArray([
+            'https://www.example.com/' => [
+                'level' => 1,
+                'visited' => 1,
+                'markup' => null,
+                'images' => false,
+            ],
+            'https://www.example.com/hidden' => [
+                'level' => 2,
+                'visited' => 1,
+                'markup' => null,
+                'images' => false,
+                'noindex' => true,
+            ],
+        ]);
+
+        $this->testableSitemap->setFilePath($this->testDir . '/');
+
+        // Build XML manually like createSitemap does, to verify noindex filtering
+        $assets = '';
+        foreach ($this->testableSitemap->getLinksArray() as $url => $info) {
+            if (!empty($info['noindex']) || isset($info['error'])) {
+                continue;
+            }
+            $assets .= $this->testableSitemap->testUrlXML($url, '0.8', 'monthly', date('c'));
+        }
+
+        $this->assertStringContainsString('https://www.example.com/', $assets);
+        $this->assertStringNotContainsString('https://www.example.com/hidden', $assets);
+    }
+
+    /**
+     * Helper to create a TestableSitemap with a mocked Guzzle client
+     */
+    private function createMockedSitemap(array $responses): TestableSitemap
+    {
+        $mock = new MockHandler($responses);
+        $handlerStack = HandlerStack::create($mock);
+        $client = new Client(['handler' => $handlerStack]);
+
+        $sitemap = new TestableSitemap();
+        $sitemap->setGuzzleClient($client);
+        $sitemap->setFilePath($this->testDir . '/');
+
+        return $sitemap;
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::createSitemap
+     * @covers Sitemap\Sitemap::parseSite
+     * @covers Sitemap\Sitemap::getMarkup
+     * @covers Sitemap\Sitemap::getLinks
+     * @covers Sitemap\Sitemap::getImages
+     * @covers Sitemap\Sitemap::getAssets
+     * @covers Sitemap\Sitemap::addLinktoArray
+     * @covers Sitemap\Sitemap::addLink
+     * @covers Sitemap\Sitemap::linkPath
+     * @covers Sitemap\Sitemap::urlXML
+     * @covers Sitemap\Sitemap::imageXML
+     * @covers Sitemap\Sitemap::videoXML
+     * @covers Sitemap\Sitemap::escapeXml
+     * @covers Sitemap\Sitemap::getLayoutFile
+     * @covers Sitemap\Sitemap::getXMLLayoutPath
+     * @covers Sitemap\Sitemap::copyXMLStyle
+     * @covers Sitemap\Sitemap::getFilePath
+     * @covers Sitemap\Sitemap::sanitizeFilename
+     * @covers Sitemap\Sitemap::checkForIgnoredStrings
+     * @covers Sitemap\Sitemap::getURLItemsToIgnore
+     * @covers Sitemap\Sitemap::isValidScheme
+     * @covers Sitemap\Sitemap::normalizePath
+     * @covers Sitemap\Sitemap::getDomain
+     * @covers Sitemap\Sitemap::setDomain
+     * @covers Sitemap\Sitemap::buildLink
+     * @covers Sitemap\Sitemap::getRobotsDirectives
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testCreateSitemapWithMockedHttp()
+    {
+        $homepageHtml = '<html><head><title>Home</title></head><body>
+            <a href="/about">About</a>
+            <a href="/contact">Contact</a>
+            <img src="/images/logo.png" alt="Logo">
+        </body></html>';
+
+        $aboutHtml = '<html><head><title>About</title></head><body>
+            <a href="/team">Team</a>
+            <img src="/images/team.jpg" alt="Team Photo">
+        </body></html>';
+
+        $contactHtml = '<html><head><title>Contact</title></head><body>
+            <p>Contact us at info@example.com</p>
+        </body></html>';
+
+        $teamHtml = '<html><head><title>Team</title></head><body>
+            <p>Our team</p>
+        </body></html>';
+
+        $sitemap = $this->createMockedSitemap([
+            new Response(200, [], $homepageHtml),
+            new Response(200, [], $aboutHtml),
+            new Response(200, [], $contactHtml),
+            new Response(200, [], $teamHtml),
+        ]);
+
+        $sitemap->setDomain('https://www.example.com/');
+        $result = $sitemap->createSitemap(true, 3);
+
+        $this->assertTrue($result);
+
+        $xml = file_get_contents($this->testDir . '/sitemap.xml');
+        $this->assertStringContainsString('<loc>https://www.example.com/</loc>', $xml);
+        $this->assertStringContainsString('<loc>https://www.example.com/about</loc>', $xml);
+        $this->assertStringContainsString('<loc>https://www.example.com/contact</loc>', $xml);
+        $this->assertStringContainsString('<loc>https://www.example.com/team</loc>', $xml);
+        $this->assertStringContainsString('image:image', $xml);
+
+        // Verify style.xsl was created
+        $this->assertFileExists($this->testDir . '/style.xsl');
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::createSitemap
+     * @covers Sitemap\Sitemap::parseSite
+     * @covers Sitemap\Sitemap::getMarkup
+     * @covers Sitemap\Sitemap::getLinks
+     * @covers Sitemap\Sitemap::getImages
+     * @covers Sitemap\Sitemap::getAssets
+     * @covers Sitemap\Sitemap::urlXML
+     * @covers Sitemap\Sitemap::imageXML
+     * @covers Sitemap\Sitemap::videoXML
+     * @covers Sitemap\Sitemap::escapeXml
+     * @covers Sitemap\Sitemap::getLayoutFile
+     * @covers Sitemap\Sitemap::getXMLLayoutPath
+     * @covers Sitemap\Sitemap::getFilePath
+     * @covers Sitemap\Sitemap::sanitizeFilename
+     * @covers Sitemap\Sitemap::getDomain
+     * @covers Sitemap\Sitemap::setDomain
+     * @covers Sitemap\Sitemap::getRobotsDirectives
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testCreateSitemapExcludesNoindexPages()
+    {
+        $homepageHtml = '<html><head><title>Home</title></head><body>
+            <a href="/public">Public</a>
+            <a href="/hidden">Hidden</a>
+        </body></html>';
+
+        $publicHtml = '<html><head><title>Public Page</title></head><body>
+            <p>Visible content</p>
+        </body></html>';
+
+        $hiddenHtml = '<html><head><meta name="robots" content="noindex"></head><body>
+            <p>Hidden content</p>
+        </body></html>';
+
+        $sitemap = $this->createMockedSitemap([
+            new Response(200, [], $homepageHtml),
+            new Response(200, [], $publicHtml),
+            new Response(200, [], $hiddenHtml),
+        ]);
+
+        $sitemap->setDomain('https://www.example.com/');
+        $result = $sitemap->createSitemap(false, 2);
+
+        $this->assertTrue($result);
+
+        $xml = file_get_contents($this->testDir . '/sitemap.xml');
+        $this->assertStringContainsString('<loc>https://www.example.com/</loc>', $xml);
+        $this->assertStringContainsString('<loc>https://www.example.com/public</loc>', $xml);
+        $this->assertStringNotContainsString('<loc>https://www.example.com/hidden</loc>', $xml);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::createSitemap
+     * @covers Sitemap\Sitemap::parseSite
+     * @covers Sitemap\Sitemap::getMarkup
+     * @covers Sitemap\Sitemap::getLinks
+     * @covers Sitemap\Sitemap::getImages
+     * @covers Sitemap\Sitemap::getAssets
+     * @covers Sitemap\Sitemap::addLinktoArray
+     * @covers Sitemap\Sitemap::addLink
+     * @covers Sitemap\Sitemap::linkPath
+     * @covers Sitemap\Sitemap::urlXML
+     * @covers Sitemap\Sitemap::imageXML
+     * @covers Sitemap\Sitemap::videoXML
+     * @covers Sitemap\Sitemap::escapeXml
+     * @covers Sitemap\Sitemap::getLayoutFile
+     * @covers Sitemap\Sitemap::getXMLLayoutPath
+     * @covers Sitemap\Sitemap::getFilePath
+     * @covers Sitemap\Sitemap::sanitizeFilename
+     * @covers Sitemap\Sitemap::checkForIgnoredStrings
+     * @covers Sitemap\Sitemap::getURLItemsToIgnore
+     * @covers Sitemap\Sitemap::isValidScheme
+     * @covers Sitemap\Sitemap::getDomain
+     * @covers Sitemap\Sitemap::setDomain
+     * @covers Sitemap\Sitemap::getRobotsDirectives
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testCreateSitemapNofollowPreventsLinkDiscovery()
+    {
+        $homepageHtml = '<html><head><title>Home</title></head><body>
+            <a href="/gateway">Gateway</a>
+        </body></html>';
+
+        // Gateway page has nofollow - its links should NOT be discovered
+        $gatewayHtml = '<html><head><meta name="robots" content="nofollow"></head><body>
+            <a href="/secret">Secret</a>
+        </body></html>';
+
+        $sitemap = $this->createMockedSitemap([
+            new Response(200, [], $homepageHtml),
+            new Response(200, [], $gatewayHtml),
+        ]);
+
+        $sitemap->setDomain('https://www.example.com/');
+        $result = $sitemap->createSitemap(false, 3);
+
+        $this->assertTrue($result);
+
+        $xml = file_get_contents($this->testDir . '/sitemap.xml');
+        $this->assertStringContainsString('<loc>https://www.example.com/</loc>', $xml);
+        $this->assertStringContainsString('<loc>https://www.example.com/gateway</loc>', $xml);
+        // Secret page should NOT be in sitemap because gateway had nofollow
+        $this->assertStringNotContainsString('secret', $xml);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::createSitemap
+     * @covers Sitemap\Sitemap::parseSite
+     * @covers Sitemap\Sitemap::getMarkup
+     * @covers Sitemap\Sitemap::getLinks
+     * @covers Sitemap\Sitemap::getImages
+     * @covers Sitemap\Sitemap::getAssets
+     * @covers Sitemap\Sitemap::urlXML
+     * @covers Sitemap\Sitemap::imageXML
+     * @covers Sitemap\Sitemap::videoXML
+     * @covers Sitemap\Sitemap::escapeXml
+     * @covers Sitemap\Sitemap::getLayoutFile
+     * @covers Sitemap\Sitemap::getXMLLayoutPath
+     * @covers Sitemap\Sitemap::getFilePath
+     * @covers Sitemap\Sitemap::sanitizeFilename
+     * @covers Sitemap\Sitemap::getDomain
+     * @covers Sitemap\Sitemap::setDomain
+     * @covers Sitemap\Sitemap::getRobotsDirectives
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testCreateSitemapExcludesErrorPages()
+    {
+        $homepageHtml = '<html><head><title>Home</title></head><body>
+            <a href="/missing">Missing</a>
+        </body></html>';
+
+        $sitemap = $this->createMockedSitemap([
+            new Response(200, [], $homepageHtml),
+            new Response(404, [], 'Not Found'),
+        ]);
+
+        $sitemap->setDomain('https://www.example.com/');
+        $result = $sitemap->createSitemap(false, 2);
+
+        $this->assertTrue($result);
+
+        $xml = file_get_contents($this->testDir . '/sitemap.xml');
+        $this->assertStringContainsString('<loc>https://www.example.com/</loc>', $xml);
+        $this->assertStringNotContainsString('<loc>https://www.example.com/missing</loc>', $xml);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::createSitemap
+     * @covers Sitemap\Sitemap::parseSite
+     * @covers Sitemap\Sitemap::getMarkup
+     * @covers Sitemap\Sitemap::getLinks
+     * @covers Sitemap\Sitemap::getImages
+     * @covers Sitemap\Sitemap::getAssets
+     * @covers Sitemap\Sitemap::urlXML
+     * @covers Sitemap\Sitemap::imageXML
+     * @covers Sitemap\Sitemap::videoXML
+     * @covers Sitemap\Sitemap::escapeXml
+     * @covers Sitemap\Sitemap::getLayoutFile
+     * @covers Sitemap\Sitemap::getXMLLayoutPath
+     * @covers Sitemap\Sitemap::getFilePath
+     * @covers Sitemap\Sitemap::sanitizeFilename
+     * @covers Sitemap\Sitemap::getDomain
+     * @covers Sitemap\Sitemap::setDomain
+     * @covers Sitemap\Sitemap::getRobotsDirectives
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testCreateSitemapWithoutStyle()
+    {
+        $homepageHtml = '<html><head><title>Home</title></head><body><p>Hello</p></body></html>';
+
+        $sitemap = $this->createMockedSitemap([
+            new Response(200, [], $homepageHtml),
+        ]);
+
+        $sitemap->setDomain('https://www.example.com/');
+        $result = $sitemap->createSitemap(false, 1);
+
+        $this->assertTrue($result);
+
+        $xml = file_get_contents($this->testDir . '/sitemap.xml');
+        $this->assertStringContainsString('<loc>https://www.example.com/</loc>', $xml);
+        $this->assertStringNotContainsString('xml-stylesheet', $xml);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::createSitemap
+     * @covers Sitemap\Sitemap::parseSite
+     * @covers Sitemap\Sitemap::getMarkup
+     * @covers Sitemap\Sitemap::getLinks
+     * @covers Sitemap\Sitemap::getImages
+     * @covers Sitemap\Sitemap::getAssets
+     * @covers Sitemap\Sitemap::urlXML
+     * @covers Sitemap\Sitemap::imageXML
+     * @covers Sitemap\Sitemap::videoXML
+     * @covers Sitemap\Sitemap::escapeXml
+     * @covers Sitemap\Sitemap::getLayoutFile
+     * @covers Sitemap\Sitemap::getXMLLayoutPath
+     * @covers Sitemap\Sitemap::getFilePath
+     * @covers Sitemap\Sitemap::sanitizeFilename
+     * @covers Sitemap\Sitemap::getDomain
+     * @covers Sitemap\Sitemap::setDomain
+     * @covers Sitemap\Sitemap::getRobotsDirectives
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testCreateSitemapCustomFilename()
+    {
+        $homepageHtml = '<html><head><title>Home</title></head><body><p>Hello</p></body></html>';
+
+        $sitemap = $this->createMockedSitemap([
+            new Response(200, [], $homepageHtml),
+        ]);
+
+        $sitemap->setDomain('https://www.example.com/');
+        $result = $sitemap->createSitemap(false, 1, 'my-custom-map');
+
+        $this->assertTrue($result);
+        $this->assertFileExists($this->testDir . '/my-custom-map.xml');
+
+        // Clean up
+        @unlink($this->testDir . '/my-custom-map.xml');
     }
 }

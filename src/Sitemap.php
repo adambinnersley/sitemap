@@ -141,12 +141,16 @@ class Sitemap
     protected function parseSite($maxlevels = 5)
     {
         $this->getMarkup($this->getDomain());
-        $this->getLinks(1);
+        if (empty($this->links[$this->getDomain()]['nofollow'])) {
+            $this->getLinks(1);
+        }
         for ($i = 1; $i <= $maxlevels; $i++) {
             foreach ($this->links as $link => $info) {
                 if ($info['visited'] == 0) {
                     $this->getMarkup($link);
-                    $this->getLinks(($info['level'] + 1));
+                    if (empty($this->links[$link]['nofollow'])) {
+                        $this->getLinks(($info['level'] + 1));
+                    }
                 }
             }
         }
@@ -168,11 +172,39 @@ class Sitemap
         $this->markup = $response->getBody();
         if ($response->getStatusCode() === 200) {
             $this->html = HtmlDomParser::str_get_html($this->markup);
+            $robotsDirectives = $this->getRobotsDirectives();
+            if (in_array('noindex', $robotsDirectives)) {
+                $this->links[$uri]['noindex'] = true;
+            }
+            if (in_array('nofollow', $robotsDirectives)) {
+                $this->links[$uri]['nofollow'] = true;
+            }
             $this->links[$uri]['markup'] = $this->html;
             $this->links[$uri]['images'] = $this->getImages();
         } else {
             $this->links[$uri]['error'] = $response->getStatusCode();
         }
+    }
+
+    /**
+     * Get the robots directives from the current page's meta tags
+     * @return array An array of lowercase directive strings (e.g. ['noindex', 'nofollow'])
+     */
+    protected function getRobotsDirectives()
+    {
+        $directives = [];
+        if (is_object($this->html)) {
+            foreach ($this->html->find('meta[name=robots]') as $meta) {
+                $content = strtolower(trim($meta->content));
+                foreach (explode(',', $content) as $directive) {
+                    $directive = trim($directive);
+                    if ($directive !== '') {
+                        $directives[] = $directive;
+                    }
+                }
+            }
+        }
+        return $directives;
     }
     
     /**
@@ -498,6 +530,9 @@ class Sitemap
     {
         $assets = '';
         foreach ($this->parseSite($maxLevels) as $url => $info) {
+            if (!empty($info['noindex']) || isset($info['error'])) {
+                continue;
+            }
             $assets .= $this->urlXML(
                 $url,
                 (isset($info['level']) ? $this->priority[$info['level']] : 1),

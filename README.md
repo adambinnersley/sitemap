@@ -1,9 +1,9 @@
 # PHP XML Sitemap Generator
-Generate a XML sitemap for a given URL. This class crawls any given website to create an XML sitemap for the domain.
+Generate an XML sitemap for a given URL. This class crawls any given website to create an XML sitemap for the domain.
 
 ## Installation
 
-Installation is available via [Composer/Packagist](https://packagist.org/packages/adamb/database), you can add the following line to your `composer.json` file:
+Installation is available via [Composer/Packagist](https://packagist.org/packages/adamb/sitemap), you can add the following line to your `composer.json` file:
 
 ```json
 "adamb/sitemap": "^1.0"
@@ -20,17 +20,14 @@ composer require adamb/sitemap
 Example of usage can be found below:
 
 ```php
-
 // Method 1
-$sitemap = new Sitemap\Sitemap('http://www.yourwebsite.co.uk');
+$sitemap = new Sitemap\Sitemap('https://www.yourwebsite.co.uk');
 $sitemap->createSitemap(); // Returns true if sitemap created else will return false
-
 
 // Method 2
 $sitemap = new Sitemap\Sitemap();
-$sitemap->setDomain('http://www.yourwebsite.co.uk');
+$sitemap->setDomain('https://www.yourwebsite.co.uk');
 $sitemap->createSitemap(); // Returns true if sitemap created else will return false
-
 ```
 
 ## Change file creation location
@@ -38,8 +35,7 @@ $sitemap->createSitemap(); // Returns true if sitemap created else will return f
 By default the sitemap.xml file is created in the document root but this can be altered using the following method.
 
 ```php
-
-$sitemap = new Sitemap\Sitemap('http://www.yourwebsite.co.uk');
+$sitemap = new Sitemap\Sitemap('https://www.yourwebsite.co.uk');
 
 // This should be an absolute path
 $sitemap->setFilePath($_SERVER['DOCUMENT_ROOT'].'sitemaps/');
@@ -49,7 +45,6 @@ $sitemap->setFilePath($_SERVER['DOCUMENT_ROOT'].'sitemaps/');
 $sitemap->setFilePath('C:\Inetpub\mywebsite.co.uk\httpdocs\sitemaps\\');
 
 $sitemap->createSitemap();
-
 ```
 
 ## Sitemap creation options
@@ -57,15 +52,39 @@ $sitemap->createSitemap();
 By default the sitemap creates a XSL stylesheet along with the sitemap. You can also change the level of the link to include in the sitemap (e.g. Only include links within 3 clicks of the homepage) and also change the filename of the sitemap on creation.
 
 ```php
-
 // To not include the XSL stylesheet set the first value to false when calling createSitemap();
 $sitemap->createSitemap(false);
 
-// To only include links within 3 click set the second value to 3
+// To only include links within 3 clicks set the second value to 3
 $sitemap->createSitemap(true, 3);
 
 // To change the filename set the third value to your filename (excluding extension)
 $sitemap->createSitemap(true, 5, 'mysitemapfile');
-
 ```
+
+## Excluding URLs
+
+You can exclude URLs containing specific strings from the sitemap using `addURLItemstoIgnore()`. This is useful for excluding admin pages, login pages, or any other URLs you don't want indexed.
+
+```php
+$sitemap = new Sitemap\Sitemap('https://www.yourwebsite.co.uk');
+
+// Exclude a single pattern
+$sitemap->addURLItemstoIgnore('admin');
+
+// Exclude multiple patterns
+$sitemap->addURLItemstoIgnore(['login', 'logout', 'private']);
+
+$sitemap->createSitemap();
+```
+
+## Automatic exclusions
+
+The crawler automatically excludes pages from the sitemap based on several criteria:
+
+- **Robots meta tags** — Pages with `<meta name="robots" content="noindex">` are excluded from the sitemap output. Pages with `<meta name="robots" content="nofollow">` will appear in the sitemap but their links will not be followed.
+- **Nofollow links** — Links with `rel="nofollow"` on the `<a>` tag are not crawled.
+- **Non-HTML resources** — URLs ending in image extensions (jpg, jpeg, gif, png, svg, webp, bmp, ico) are skipped.
+- **External links** — Only links on the same domain are included.
+- **Error pages** — Pages returning non-200 HTTP status codes are excluded.
 
