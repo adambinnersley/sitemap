@@ -1818,4 +1818,67 @@ class SitemapTest extends TestCase
         // Clean up
         @unlink($this->testDir . '/my-custom-map.xml');
     }
+
+    /**
+     * @covers Sitemap\Sitemap::createSitemap
+     * @covers Sitemap\Sitemap::parseSite
+     * @covers Sitemap\Sitemap::getMarkup
+     * @covers Sitemap\Sitemap::getLinks
+     * @covers Sitemap\Sitemap::getImages
+     * @covers Sitemap\Sitemap::getAssets
+     * @covers Sitemap\Sitemap::addLinktoArray
+     * @covers Sitemap\Sitemap::addLink
+     * @covers Sitemap\Sitemap::linkPath
+     * @covers Sitemap\Sitemap::urlXML
+     * @covers Sitemap\Sitemap::imageXML
+     * @covers Sitemap\Sitemap::videoXML
+     * @covers Sitemap\Sitemap::escapeXml
+     * @covers Sitemap\Sitemap::getLayoutFile
+     * @covers Sitemap\Sitemap::getXMLLayoutPath
+     * @covers Sitemap\Sitemap::getFilePath
+     * @covers Sitemap\Sitemap::sanitizeFilename
+     * @covers Sitemap\Sitemap::checkForIgnoredStrings
+     * @covers Sitemap\Sitemap::getURLItemsToIgnore
+     * @covers Sitemap\Sitemap::isValidScheme
+     * @covers Sitemap\Sitemap::getDomain
+     * @covers Sitemap\Sitemap::setDomain
+     * @covers Sitemap\Sitemap::getRobotsDirectives
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testCreateSitemapExcludesRedirectedPages()
+    {
+        $homepageHtml = '<html><head><title>Home</title></head><body>
+            <a href="/store">Store</a>
+            <a href="/store/basket">Basket</a>
+        </body></html>';
+
+        $storeHtml = '<html><head><title>Store</title></head><body>
+            <p>Welcome to the store</p>
+        </body></html>';
+
+        // /store/basket redirects to /store when empty - Guzzle follows the redirect
+        // and sets X-Guzzle-Redirect-History header on the final response
+        $basketRedirectResponse = new Response(200, [
+            'X-Guzzle-Redirect-History' => ['https://www.example.com/store'],
+            'X-Guzzle-Redirect-Status-History' => [302],
+        ], $storeHtml);
+
+        $sitemap = $this->createMockedSitemap([
+            new Response(200, [], $homepageHtml),
+            new Response(200, [], $storeHtml),
+            $basketRedirectResponse,
+        ]);
+
+        $sitemap->setDomain('https://www.example.com/');
+        $result = $sitemap->createSitemap(false, 2);
+
+        $this->assertTrue($result);
+
+        $xml = file_get_contents($this->testDir . '/sitemap.xml');
+        $this->assertStringContainsString('<loc>https://www.example.com/</loc>', $xml);
+        $this->assertStringContainsString('<loc>https://www.example.com/store</loc>', $xml);
+        $this->assertStringNotContainsString('<loc>https://www.example.com/store/basket</loc>', $xml);
+    }
 }

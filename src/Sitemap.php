@@ -169,6 +169,11 @@ class Sitemap
         $this->links[$uri]['visited'] = 1;
 
         $response = $this->guzzle->request('GET', $uri, ['http_errors' => false, 'track_redirects' => true]);
+        $redirectHistory = $response->getHeader('X-Guzzle-Redirect-History');
+        if (!empty($redirectHistory)) {
+            $this->links[$uri]['error'] = 301;
+            return;
+        }
         $this->markup = $response->getBody();
         if ($response->getStatusCode() === 200) {
             $this->html = HtmlDomParser::str_get_html($this->markup);
