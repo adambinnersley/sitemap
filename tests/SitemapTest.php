@@ -151,6 +151,11 @@ class TestableSitemap extends Sitemap
         return $this->getRobotsDirectives();
     }
 
+    public function testGetMarkup($uri)
+    {
+        return $this->getMarkup($uri);
+    }
+
     public function setLinksArray($links)
     {
         $this->links = $links;
@@ -1847,6 +1852,150 @@ class SitemapTest extends TestCase
      * @covers Sitemap\Sitemap::setFilePath
      * @covers Sitemap\Sitemap::setXMLLayoutPath
      */
+    /**
+     * @covers Sitemap\Sitemap::getMarkup
+     * @covers Sitemap\Sitemap::getRobotsDirectives
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testGetMarkupSetsNoindexFromXRobotsTagHeader()
+    {
+        $sitemap = $this->createMockedSitemap([
+            new Response(200, ['X-Robots-Tag' => 'noindex'], '<html><body><p>Content</p></body></html>'),
+        ]);
+        $sitemap->setDomain('https://www.example.com/');
+        $sitemap->testGetMarkup('https://www.example.com/page');
+
+        $links = $sitemap->getLinksArray();
+        $this->assertTrue($links['https://www.example.com/page']['noindex']);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::getMarkup
+     * @covers Sitemap\Sitemap::getRobotsDirectives
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testGetMarkupSetsNofollowFromXRobotsTagHeader()
+    {
+        $sitemap = $this->createMockedSitemap([
+            new Response(200, ['X-Robots-Tag' => 'noindex, nofollow'], '<html><body><a href="/other">Other</a></body></html>'),
+        ]);
+        $sitemap->setDomain('https://www.example.com/');
+        $sitemap->testGetMarkup('https://www.example.com/page');
+
+        $links = $sitemap->getLinksArray();
+        $this->assertTrue($links['https://www.example.com/page']['noindex']);
+        $this->assertTrue($links['https://www.example.com/page']['nofollow']);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::getMarkup
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testGetMarkupResetsStateOnRedirect()
+    {
+        $sitemap = $this->createMockedSitemap([
+            // First call: normal page
+            new Response(200, [], '<html><body><a href="/first">First</a></body></html>'),
+            // Second call: redirected page (state should be cleared)
+            new Response(200, [
+                'X-Guzzle-Redirect-History' => ['https://www.example.com/destination'],
+            ], '<html><body></body></html>'),
+        ]);
+        $sitemap->setDomain('https://www.example.com/');
+
+        $sitemap->testGetMarkup('https://www.example.com/');
+        // After first call, html and markup are populated
+        $this->assertNotNull($sitemap->html);
+
+        $sitemap->testGetMarkup('https://www.example.com/redirected');
+        // After redirect detection, html and markup must be cleared
+        $this->assertNull($sitemap->html);
+        $this->assertEmpty($sitemap->markup);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::getMarkup
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testGetMarkupQueuesRedirectDestinationForCrawling()
+    {
+        $sitemap = $this->createMockedSitemap([
+            new Response(200, [
+                'X-Guzzle-Redirect-History' => ['https://www.example.com/new-page'],
+            ], ''),
+        ]);
+        $sitemap->setDomain('https://www.example.com/');
+        $sitemap->setLinksArray([
+            'https://www.example.com/old-page' => ['level' => 2, 'visited' => 0],
+        ]);
+        $sitemap->testGetMarkup('https://www.example.com/old-page');
+
+        $links = $sitemap->getLinksArray();
+        $this->assertEquals(301, $links['https://www.example.com/old-page']['error']);
+        $this->assertArrayHasKey('https://www.example.com/new-page', $links);
+        $this->assertEquals(0, $links['https://www.example.com/new-page']['visited']);
+        $this->assertEquals(2, $links['https://www.example.com/new-page']['level']);
+    }
+
+    /**
+     * @covers Sitemap\Sitemap::createSitemap
+     * @covers Sitemap\Sitemap::parseSite
+     * @covers Sitemap\Sitemap::getMarkup
+     * @covers Sitemap\Sitemap::getLinks
+     * @covers Sitemap\Sitemap::getImages
+     * @covers Sitemap\Sitemap::getAssets
+     * @covers Sitemap\Sitemap::urlXML
+     * @covers Sitemap\Sitemap::imageXML
+     * @covers Sitemap\Sitemap::videoXML
+     * @covers Sitemap\Sitemap::escapeXml
+     * @covers Sitemap\Sitemap::getLayoutFile
+     * @covers Sitemap\Sitemap::getXMLLayoutPath
+     * @covers Sitemap\Sitemap::getFilePath
+     * @covers Sitemap\Sitemap::sanitizeFilename
+     * @covers Sitemap\Sitemap::getDomain
+     * @covers Sitemap\Sitemap::setDomain
+     * @covers Sitemap\Sitemap::getRobotsDirectives
+     * @covers Sitemap\Sitemap::__construct
+     * @covers Sitemap\Sitemap::setFilePath
+     * @covers Sitemap\Sitemap::setXMLLayoutPath
+     */
+    public function testCreateSitemapExcludesXRobotsTagNoindexPages()
+    {
+        $homepageHtml = '<html><head><title>Home</title></head><body>
+            <a href="/normal">Normal</a>
+            <a href="/server-noindex">Server Noindex</a>
+        </body></html>';
+
+        $normalHtml = '<html><head><title>Normal</title></head><body><p>Normal content</p></body></html>';
+
+        // This page sends X-Robots-Tag: noindex via HTTP header (e.g. set by the server/CMS)
+        $serverNoindexHtml = '<html><head><title>Server Noindex</title></head><body><p>Hidden</p></body></html>';
+
+        $sitemap = $this->createMockedSitemap([
+            new Response(200, [], $homepageHtml),
+            new Response(200, [], $normalHtml),
+            new Response(200, ['X-Robots-Tag' => 'noindex'], $serverNoindexHtml),
+        ]);
+
+        $sitemap->setDomain('https://www.example.com/');
+        $result = $sitemap->createSitemap(false, 2);
+
+        $this->assertTrue($result);
+
+        $xml = file_get_contents($this->testDir . '/sitemap.xml');
+        $this->assertStringContainsString('<loc>https://www.example.com/</loc>', $xml);
+        $this->assertStringContainsString('<loc>https://www.example.com/normal</loc>', $xml);
+        $this->assertStringNotContainsString('<loc>https://www.example.com/server-noindex</loc>', $xml);
+    }
+
     public function testCreateSitemapExcludesRedirectedPages()
     {
         $homepageHtml = '<html><head><title>Home</title></head><body>

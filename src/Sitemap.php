@@ -141,14 +141,14 @@ class Sitemap
     protected function parseSite($maxlevels = 5)
     {
         $this->getMarkup($this->getDomain());
-        if (empty($this->links[$this->getDomain()]['nofollow'])) {
+        if (empty($this->links[$this->getDomain()]['nofollow']) && empty($this->links[$this->getDomain()]['error'])) {
             $this->getLinks(1);
         }
         for ($i = 1; $i <= $maxlevels; $i++) {
             foreach ($this->links as $link => $info) {
                 if ($info['visited'] == 0) {
                     $this->getMarkup($link);
-                    if (empty($this->links[$link]['nofollow'])) {
+                    if (empty($this->links[$link]['nofollow']) && empty($this->links[$link]['error'])) {
                         $this->getLinks(($info['level'] + 1));
                     }
                 }
@@ -162,22 +162,44 @@ class Sitemap
      * @param string $uri This should be the page URL you wish to crawl and get the headers and page information
      * @return void
      */
-    private function getMarkup($uri)
+    protected function getMarkup($uri)
     {
         $this->url = $uri;
         $this->host = parse_url($this->url);
+        $this->markup = '';
+        $this->html = null;
         $this->links[$uri]['visited'] = 1;
 
-        $response = $this->guzzle->request('GET', $uri, ['http_errors' => false, 'track_redirects' => true]);
+        $response = $this->guzzle->request('GET', $uri, [
+            'http_errors' => false,
+            'allow_redirects' => ['track_redirects' => true],
+        ]);
         $redirectHistory = $response->getHeader('X-Guzzle-Redirect-History');
         if (!empty($redirectHistory)) {
             $this->links[$uri]['error'] = 301;
+            $finalDestination = end($redirectHistory);
+            $parsedDest = parse_url($finalDestination);
+            if ($parsedDest !== false && isset($parsedDest['host']) && $parsedDest['host'] === $this->host['host'] && !isset($this->links[$finalDestination])) {
+                $this->links[$finalDestination] = [
+                    'level' => isset($this->links[$uri]['level']) ? $this->links[$uri]['level'] : 1,
+                    'visited' => 0,
+                ];
+            }
             return;
         }
         $this->markup = $response->getBody();
         if ($response->getStatusCode() === 200) {
             $this->html = HtmlDomParser::str_get_html($this->markup);
             $robotsDirectives = $this->getRobotsDirectives();
+            $xRobotsTag = $response->getHeaderLine('X-Robots-Tag');
+            if (!empty($xRobotsTag)) {
+                foreach (explode(',', strtolower($xRobotsTag)) as $directive) {
+                    $directive = trim($directive);
+                    if ($directive !== '') {
+                        $robotsDirectives[] = $directive;
+                    }
+                }
+            }
             if (in_array('noindex', $robotsDirectives)) {
                 $this->links[$uri]['noindex'] = true;
             }
